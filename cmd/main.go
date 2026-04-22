@@ -1,65 +1,83 @@
 package main
 
 import (
-	"encoding/json" // Paquete para manejar el formato JSON
+	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"github.com/Zheta-ai/CloudGuard/internal/database"
 )
 
-// Credenciales es el molde (struct) para recibir los datos del usuario desde internet.
-// Las etiquetas json:"..." mapean los nombres que vienen de la web a nuestras variables.
-type Credenciales struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+// 1. NUEVOS STRUCTS: Lo que recibimos y lo que respondemos
+type PeticionTransaccion struct {
+	UserID    string  `json:"user_id"`
+	Monto     float64 `json:"monto"`
+	Ubicacion string  `json:"ubicacion"`
+}
+
+type RespuestaRiesgo struct {
+	RiskScore int    `json:"risk_score"`
+	Status    string `json:"status"` // allow, verify, block
+	Flag      string `json:"flag"`
 }
 
 func main() {
-	fmt.Println("🚀 Iniciando los sistemas de CloudGuard...")
+	fmt.Println("🚀 Iniciando CloudGuard Risk-API...")
 
-	// 1. Conexión a la Bóveda (PostgreSQL)
+	// 1. Conexión a la Bóveda y creación de la tabla de transacciones
 	db := database.ConectarDB()
-	defer db.Close() // Mantiene la puerta abierta hasta que el programa se apague
-
-	// 2. Verificación de Tablas
+	defer db.Close()
 	database.CrearTablas(db)
 
 	// ================================================================
-	// 📡 RUTA API: REGISTRO DE USUARIOS
-	// Esta ruta recibirá peticiones externas (JSON) para crear usuarios.
+	// 📡 RUTA API: ANÁLISIS DE RIESGO EN TIEMPO REAL
 	// ================================================================
-	http.HandleFunc("/api/registro", func(w http.ResponseWriter, r *http.Request) {
-
-		// Seguridad básica: Solo permitimos el método POST
+	http.HandleFunc("/api/analyze", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "❌ Método no permitido. Usa POST.", http.StatusMethodNotAllowed)
 			return
 		}
 
-		// Decodificamos el JSON que nos envían
-		var creds Credenciales
-		err := json.NewDecoder(r.Body).Decode(&creds)
+		// Decodificamos el JSON que nos envía la Fintech
+		var peticion PeticionTransaccion
+		err := json.NewDecoder(r.Body).Decode(&peticion)
 		if err != nil {
 			http.Error(w, "❌ Error al leer los datos JSON", http.StatusBadRequest)
 			return
 		}
 
-		// Enviamos los datos a la función de registro que ya teníamos
-		database.RegistrarUsuario(db, creds.Email, creds.Password)
+		// MANDAMOS A EVALUAR AL MOTOR DE RIESGO (nuestra función en riesgo.go)
+		puntaje, flagRecibido := database.EvaluarTransaccion(db, peticion.UserID, peticion.Monto, peticion.Ubicacion)
 
-		// Respondemos al cliente confirmando el éxito
+		// Decidimos la acción (Status) basados en el puntaje
+		var statusFinal string
+		if puntaje >= 50 {
+			statusFinal = "block"
+		} else if puntaje >= 20 {
+			statusFinal = "verify"
+		} else {
+			statusFinal = "allow"
+		}
+
+		// Armamos la respuesta
+		respuesta := RespuestaRiesgo{
+			RiskScore: puntaje,
+			Status:    statusFinal,
+			Flag:      flagRecibido,
+		}
+
+		// Enviamos el JSON de vuelta al cliente
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		fmt.Fprintf(w, `{"mensaje": "✅ Usuario %s registrado con éxito"}`, creds.Email)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(respuesta)
 	})
 
-	// Ruta de bienvenida/estado de la API
+	// Ruta de estado
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "🌐 CloudGuard API Core - Sistemas Activos")
+		fmt.Fprintf(w, "🌐 CloudGuard Risk-API - Sistemas Activos")
 	})
 
-	// 3. Lanzamiento del Servidor
+	// Lanzamiento del Servidor
 	fmt.Println("🌐 API escuchando en http://localhost:8080")
 	err := http.ListenAndServe(":8080", nil)
 	if err != nil {
